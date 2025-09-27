@@ -81,7 +81,7 @@ def encode_jpeg(frame: np.ndarray, quality: int = 90, max_width: int | None = No
     return buf.tobytes()
 
 
-def send_to_vm(vm_url: str, jpg_bytes: bytes, camera_id: str, token: str | None, timeout_s: float = 15.0):
+def send_to_vm(vm_url: str, jpg_bytes: bytes, camera_id: str, token: str | None, timeout_s: float = 150.0):
     """Envía un JPEG a la VM por POST multipart/form-data: campo 'frame', y 'meta' en JSON."""
     headers = {}
     if token:
