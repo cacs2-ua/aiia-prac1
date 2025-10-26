@@ -1,27 +1,36 @@
 # practica_tarea13_cli.py
-# Task 1.3 — Per-frame people counting with YOLOv8, CSV, and time plot (.jpg)
+# Task 1.3 — Per-frame people counting with YOLOv8, CSV logging, and time plot (.jpg)
 # Usage examples:
 #   python practica_tarea13_cli.py --samples 30
 #   python practica_tarea13_cli.py --samples 30 --stream-url "http://.../mjpg/video.mjpg" --interval 5 --plot-out person_count.jpg
+#   python practica_tarea13_cli.py --samples 200 --stream-url 0 --interval 0 --show  # webcam 0, process EVERY frame
 
 import os
 import time
 import csv
 import argparse
 from datetime import datetime
-from typing import List
+from typing import List, Union
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 import matplotlib.pyplot as plt
 
+
 # ============================
 # ========= UTILITIES =========
 # ============================
 
+def ensure_parent_dir(path: str) -> None:
+    """Create parent directory for a file path if it does not exist (no-op if path has no dir)."""
+    d = os.path.dirname(os.path.abspath(path))
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+
 def ensure_csv_with_header(csv_path: str) -> None:
     """Create CSV with header if it does not exist."""
+    ensure_parent_dir(csv_path)
     if not os.path.exists(csv_path):
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["Timestamp", "Person_Count"])
@@ -33,21 +42,33 @@ def append_csv(csv_path: str, ts: str, count: int) -> None:
         writer = csv.DictWriter(f, fieldnames=["Timestamp", "Person_Count"])
         writer.writerow({"Timestamp": ts, "Person_Count": count})
 
-def open_capture(url: str) -> cv2.VideoCapture:
+def parse_source(source_str: str) -> Union[int, str]:
     """
-    Try to open the stream with FFmpeg backend (good for HLS) and fall back to default.
-    Attempt to minimize internal buffering if the backend supports it.
+    Accept '0', '1', ... as webcam indices. Otherwise return the original string (URL or file path).
     """
-    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(url)
+    try:
+        return int(source_str)
+    except (ValueError, TypeError):
+        return source_str
+
+def open_capture(src: Union[int, str]) -> cv2.VideoCapture:
+    """
+    Open camera (int index) or stream (URL/path). Try FFmpeg first for URLs (useful for HLS),
+    then fall back to default backend. Attempts to minimize internal buffering.
+    """
+    if isinstance(src, int):
+        cap = cv2.VideoCapture(src)
+    else:
+        cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(src)
     # Best-effort: shrink buffers (silently ignored if unsupported).
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
     if not cap.isOpened():
-        raise RuntimeError(f"No se pudo abrir el stream: {url}")
+        raise RuntimeError(f"Could not open source: {src}")
     return cap
 
 def draw_boxes(frame: np.ndarray, boxes_xyxy: List[List[int]], confs: List[float]) -> np.ndarray:
@@ -65,6 +86,10 @@ def plot_csv(csv_path: str, out_path: str) -> None:
     X-axis uses sample index; tick labels show spaced timestamps for readability.
     """
     timestamps, counts = [], []
+    if not os.path.exists(csv_path):
+        print("CSV file not found: nothing to plot.")
+        return
+
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -72,15 +97,15 @@ def plot_csv(csv_path: str, out_path: str) -> None:
             counts.append(int(row["Person_Count"]))
 
     if not counts:
-        print("CSV vacío: no hay datos para graficar.")
+        print("Empty CSV: no data to plot.")
         return
 
     x = list(range(len(counts)))
     plt.figure(figsize=(10, 4.5))
     plt.plot(x, counts, marker="o")
-    plt.title("Evolución del número de personas detectadas")
-    plt.xlabel("Muestras (en el tiempo)")
-    plt.ylabel("Personas por frame")
+    plt.title("People detected per sampled frame")
+    plt.xlabel("Samples (over time)")
+    plt.ylabel("Persons per frame")
     plt.grid(True, linestyle="--", alpha=0.4)
 
     # Space out timestamp tick labels
@@ -93,9 +118,12 @@ def plot_csv(csv_path: str, out_path: str) -> None:
     # Ensure JPG extension
     if not out_path.lower().endswith((".jpg", ".jpeg")):
         out_path += ".jpg"
+
+    ensure_parent_dir(out_path)
     plt.savefig(out_path, dpi=150)
     plt.close()
-    print(f"Gráfica guardada en: {out_path}")
+    print(f"Plot saved to: {out_path}")
+
 
 # ============================
 # =========== MAIN ===========
@@ -103,38 +131,41 @@ def plot_csv(csv_path: str, out_path: str) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Cuenta personas con YOLOv8, guarda CSV y genera gráfica .jpg tras N muestras."
+        description="Count people with YOLOv8, save CSV, and generate a .jpg plot after N samples."
     )
     parser.add_argument("--samples", type=int, required=True,
-                        help="Número de muestras a tomar (frames muestreados).")
-    parser.add_argument("--stream-url", type=str,
-                        default="https://video2archives.earthcam.com/earthcamtv-vod/_definst_/mp4:archives/AbbeyRoadHD1/backup.mp4/playlist.m3u8",
-                        help="URL del stream (HLS .m3u8 o MJPEG).")
+                        help="Number of samples to take (sampled frames).")
+    parser.add_argument(
+        "--stream-url",
+        type=str,
+        default="https://video2archives.earthcam.com/earthcamtv-vod/_definst_/mp4:archives/AbbeyRoadHD1/backup.mp4/playlist.m3u8",
+        help="Stream URL/path (HLS .m3u8, MJPEG, local file). Use '0' (or '1', ...) for a webcam index."
+    )
     parser.add_argument("--interval", type=float, default=5.0,
-                        help="Intervalo de muestreo en segundos (p. ej., 5.0).")
+                        help="Sampling interval in seconds. Use 0 to process EVERY frame.")
     parser.add_argument("--model", type=str, default="yolov8n.pt",
-                        help="Ruta al modelo YOLOv8 (se descarga si no existe).")
+                        help="YOLOv8 model path (auto-downloads if missing).")
     parser.add_argument("--imgsz", type=int, default=640,
-                        help="Tamaño de entrada para YOLO (mayor = más lento, potencialmente más preciso).")
+                        help="YOLO input size (higher = slower, potentially more accurate).")
     parser.add_argument("--device", type=str, default="",
-                        help="Dispositivo para YOLO ('' autodetecta; use 'cpu' o '0' para GPU 0 si procede).")
+                        help="Device for YOLO ('' autodetects; use 'cpu' or '0' for GPU 0 if available).")
     parser.add_argument("--csv-out", type=str, default="person_counts.csv",
-                        help="Ruta del CSV de salida.")
+                        help="Output CSV path.")
     parser.add_argument("--plot-out", type=str, default="person_count.jpg",
-                        help="Ruta del .jpg para la gráfica.")
+                        help="Output .jpg plot path.")
     parser.add_argument("--conf", type=float, default=0.5,
-                        help="Umbral de confianza para detección.")
+                        help="Detection confidence threshold.")
     parser.add_argument("--show", action="store_true",
-                        help="Muestra ventana con los frames anotados.")
+                        help="Show a window with annotated frames.")
     parser.add_argument("--save-frame", action="store_true",
-                        help="Guarda el último frame anotado como last_annotated_frame.jpg")
+                        help="Save the last annotated frame as last_annotated_frame.jpg")
     return parser.parse_args()
 
 def main():
     args = parse_args()
 
     SAMPLES_TARGET = max(1, args.samples)
-    STREAM_URL = args.stream_url
+    SOURCE = parse_source(args.stream_url)
     SAMPLE_EVERY_SECONDS = max(0.0, args.interval)
     YOLO_MODEL_PATH = args.model
     CSV_PATH = args.csv_out
@@ -142,16 +173,16 @@ def main():
     CONF_THRESHOLD = float(args.conf)
     SHOW_WINDOW = bool(args.show)
     SAVE_ANNOTATED_FRAME = bool(args.save_frame)
-    PERSON_CLASS_ID = 0
+    PERSON_CLASS_ID = 0  # COCO person class
 
     ensure_csv_with_header(CSV_PATH)
 
-    print("Cargando modelo YOLOv8...")
+    print("Loading YOLOv8 model...")
     model = YOLO(YOLO_MODEL_PATH)  # auto-downloads if missing
 
-    print(f"Abriendo stream: {STREAM_URL}")
-    cap = open_capture(STREAM_URL)
-    print("Stream abierto correctamente.")
+    print(f"Opening source: {SOURCE}")
+    cap = open_capture(SOURCE)
+    print("Source opened successfully.")
 
     # Sample immediately on start (no initial delay).
     last_sample_time = time.time() - SAMPLE_EVERY_SECONDS
@@ -164,13 +195,13 @@ def main():
             if not ok or frame is None:
                 consecutive_failures += 1
                 wait_s = min(3 * consecutive_failures, 10)  # simple backoff up to 10s
-                print(f"Frame no válido ({consecutive_failures}). Reintentando en {wait_s}s...")
+                print(f"Invalid frame ({consecutive_failures}). Retrying in {wait_s}s...")
                 try:
                     cap.release()
                 except Exception:
                     pass
                 time.sleep(wait_s)
-                cap = open_capture(STREAM_URL)
+                cap = open_capture(SOURCE)
                 continue
             else:
                 consecutive_failures = 0
@@ -178,7 +209,7 @@ def main():
             now = time.time()
             if (now - last_sample_time) < SAMPLE_EVERY_SECONDS:
                 if SHOW_WINDOW:
-                    cv2.imshow("Preview (sin muestrear)", frame)
+                    cv2.imshow("Preview (not sampled)", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
                 else:
@@ -203,8 +234,9 @@ def main():
             boxes_xyxy, confs = [], []
             if getattr(res, "boxes", None) is not None and len(res.boxes) > 0:
                 for b in res.boxes:
-                    cls_id = int(b.cls[0].item()) if b.cls is not None else -1
-                    score = float(b.conf[0].item()) if b.conf is not None else 0.0
+                    # Defensive access for different Ultralytics versions
+                    cls_id = int(b.cls[0].item()) if getattr(b, "cls", None) is not None else -1
+                    score = float(b.conf[0].item()) if getattr(b, "conf", None) is not None else 0.0
                     if cls_id == PERSON_CLASS_ID and score >= CONF_THRESHOLD:
                         x1, y1, x2, y2 = map(int, b.xyxy[0].tolist())
                         boxes_xyxy.append([x1, y1, x2, y2])
@@ -214,11 +246,14 @@ def main():
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             append_csv(CSV_PATH, timestamp, person_count)
             taken += 1
-            print(f"[{taken}/{SAMPLES_TARGET}] {timestamp} → Personas: {person_count}")
+            print(f"[{taken}/{SAMPLES_TARGET}] {timestamp} → Persons: {person_count}")
 
             annotated = draw_boxes(frame.copy(), boxes_xyxy, confs) if boxes_xyxy else frame
             if SAVE_ANNOTATED_FRAME:
-                cv2.imwrite("last_annotated_frame.jpg", annotated)
+                try:
+                    cv2.imwrite("last_annotated_frame.jpg", annotated)
+                except Exception as e:
+                    print(f"Failed to save annotated frame: {e}")
 
             if SHOW_WINDOW:
                 cv2.imshow("YOLOv8 Person Detection", annotated)
@@ -226,7 +261,7 @@ def main():
                     break
 
     except KeyboardInterrupt:
-        print("Interrumpido por el usuario.")
+        print("Interrupted by user.")
     finally:
         try:
             cap.release()
@@ -238,7 +273,7 @@ def main():
     try:
         plot_csv(CSV_PATH, PLOT_PATH)
     except Exception as e:
-        print(f"No se pudo generar la gráfica: {e}")
+        print(f"Could not generate plot: {e}")
 
 if __name__ == "__main__":
     main()
