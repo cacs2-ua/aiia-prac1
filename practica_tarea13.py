@@ -1,6 +1,6 @@
 # practica_tarea13_cli.py
-# Tarea 1.3 — Detección de personas por frame con YOLOv8, CSV y gráfica (.jpg)
-# Uso:
+# Task 1.3 — Per-frame people counting with YOLOv8, CSV, and time plot (.jpg)
+# Usage examples:
 #   python practica_tarea13_cli.py --samples 30
 #   python practica_tarea13_cli.py --samples 30 --stream-url "http://.../mjpg/video.mjpg" --interval 5 --plot-out person_count.jpg
 
@@ -17,30 +17,41 @@ from ultralytics import YOLO
 import matplotlib.pyplot as plt
 
 # ============================
-# ======= UTILIDADES =========
+# ========= UTILITIES =========
 # ============================
 
 def ensure_csv_with_header(csv_path: str) -> None:
+    """Create CSV with header if it does not exist."""
     if not os.path.exists(csv_path):
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["Timestamp", "Person_Count"])
             writer.writeheader()
 
 def append_csv(csv_path: str, ts: str, count: int) -> None:
+    """Append a single (timestamp, count) row to CSV."""
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["Timestamp", "Person_Count"])
         writer.writerow({"Timestamp": ts, "Person_Count": count})
 
 def open_capture(url: str) -> cv2.VideoCapture:
-    # Intento con FFmpeg (para m3u8) y fallback sin flag
+    """
+    Try to open the stream with FFmpeg backend (good for HLS) and fall back to default.
+    Attempt to minimize internal buffering if the backend supports it.
+    """
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
         cap = cv2.VideoCapture(url)
+    # Best-effort: shrink buffers (silently ignored if unsupported).
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
     if not cap.isOpened():
         raise RuntimeError(f"No se pudo abrir el stream: {url}")
     return cap
 
 def draw_boxes(frame: np.ndarray, boxes_xyxy: List[List[int]], confs: List[float]) -> np.ndarray:
+    """Draw green boxes + confidences for detected persons."""
     for (x1, y1, x2, y2), score in zip(boxes_xyxy, confs):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         label = f"person {score:.2f}"
@@ -49,7 +60,10 @@ def draw_boxes(frame: np.ndarray, boxes_xyxy: List[List[int]], confs: List[float
     return frame
 
 def plot_csv(csv_path: str, out_path: str) -> None:
-    """Genera una gráfica JPG de Person_Count vs. tiempo a partir del CSV."""
+    """
+    Generate a JPG plot of Person_Count over samples using the CSV.
+    X-axis uses sample index; tick labels show spaced timestamps for readability.
+    """
     timestamps, counts = [], []
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -69,17 +83,17 @@ def plot_csv(csv_path: str, out_path: str) -> None:
     plt.ylabel("Personas por frame")
     plt.grid(True, linestyle="--", alpha=0.4)
 
-    # Etiquetas de tiempo espaciadas
+    # Space out timestamp tick labels
     N = max(1, len(timestamps) // 10)
     xticks_positions = list(range(0, len(x), N))
     xticks_labels = [timestamps[i] for i in xticks_positions]
     plt.xticks(xticks_positions, xticks_labels, rotation=45, ha="right")
 
     plt.tight_layout()
-    # Aseguramos extensión JPG
-    if not out_path.lower().endswith(".jpg") and not out_path.lower().endswith(".jpeg"):
+    # Ensure JPG extension
+    if not out_path.lower().endswith((".jpg", ".jpeg")):
         out_path += ".jpg"
-    plt.savefig(out_path, dpi=150)  # Matplotlib guarda JPG si la extensión es .jpg/.jpeg
+    plt.savefig(out_path, dpi=150)
     plt.close()
     print(f"Gráfica guardada en: {out_path}")
 
@@ -93,12 +107,17 @@ def parse_args():
     )
     parser.add_argument("--samples", type=int, required=True,
                         help="Número de muestras a tomar (frames muestreados).")
-    parser.add_argument("--stream-url", type=str, default="https://video2archives.earthcam.com/earthcamtv-vod/_definst_/mp4:archives/AbbeyRoadHD1/backup.mp4/playlist.m3u8",
+    parser.add_argument("--stream-url", type=str,
+                        default="https://video2archives.earthcam.com/earthcamtv-vod/_definst_/mp4:archives/AbbeyRoadHD1/backup.mp4/playlist.m3u8",
                         help="URL del stream (HLS .m3u8 o MJPEG).")
     parser.add_argument("--interval", type=float, default=5.0,
                         help="Intervalo de muestreo en segundos (p. ej., 5.0).")
     parser.add_argument("--model", type=str, default="yolov8n.pt",
                         help="Ruta al modelo YOLOv8 (se descarga si no existe).")
+    parser.add_argument("--imgsz", type=int, default=640,
+                        help="Tamaño de entrada para YOLO (mayor = más lento, potencialmente más preciso).")
+    parser.add_argument("--device", type=str, default="",
+                        help="Dispositivo para YOLO ('' autodetecta; use 'cpu' o '0' para GPU 0 si procede).")
     parser.add_argument("--csv-out", type=str, default="person_counts.csv",
                         help="Ruta del CSV de salida.")
     parser.add_argument("--plot-out", type=str, default="person_count.jpg",
@@ -128,24 +147,33 @@ def main():
     ensure_csv_with_header(CSV_PATH)
 
     print("Cargando modelo YOLOv8...")
-    model = YOLO(YOLO_MODEL_PATH)  # descarga si no existe
+    model = YOLO(YOLO_MODEL_PATH)  # auto-downloads if missing
 
-    print(f"Abrriendo stream: {STREAM_URL}")
+    print(f"Abriendo stream: {STREAM_URL}")
     cap = open_capture(STREAM_URL)
     print("Stream abierto correctamente.")
 
-    last_sample_time = 0.0
+    # Sample immediately on start (no initial delay).
+    last_sample_time = time.time() - SAMPLE_EVERY_SECONDS
     taken = 0
+    consecutive_failures = 0
 
     try:
         while taken < SAMPLES_TARGET:
             ok, frame = cap.read()
             if not ok or frame is None:
-                print("Frame no válido. Reintentando en 3s...")
-                cap.release()
-                time.sleep(3)
+                consecutive_failures += 1
+                wait_s = min(3 * consecutive_failures, 10)  # simple backoff up to 10s
+                print(f"Frame no válido ({consecutive_failures}). Reintentando en {wait_s}s...")
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                time.sleep(wait_s)
                 cap = open_capture(STREAM_URL)
                 continue
+            else:
+                consecutive_failures = 0
 
             now = time.time()
             if (now - last_sample_time) < SAMPLE_EVERY_SECONDS:
@@ -153,26 +181,32 @@ def main():
                     cv2.imshow("Preview (sin muestrear)", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
+                else:
+                    # Be nice to the CPU when not sampling
+                    time.sleep(0.01)
                 continue
 
+            # Time to sample
             last_sample_time = now
 
-            # Inferencia solo clase "person"
+            # Run inference on the current frame (persons only)
             results = model.predict(
                 source=frame,
                 conf=CONF_THRESHOLD,
                 classes=[PERSON_CLASS_ID],
+                imgsz=args.imgsz,
+                device=args.device if args.device is not None else "",
                 verbose=False
             )
             res = results[0]
 
             boxes_xyxy, confs = [], []
-            if res.boxes is not None and len(res.boxes) > 0:
+            if getattr(res, "boxes", None) is not None and len(res.boxes) > 0:
                 for b in res.boxes:
                     cls_id = int(b.cls[0].item()) if b.cls is not None else -1
                     score = float(b.conf[0].item()) if b.conf is not None else 0.0
                     if cls_id == PERSON_CLASS_ID and score >= CONF_THRESHOLD:
-                        x1, y1, x2, y2 = b.xyxy[0].int().tolist()
+                        x1, y1, x2, y2 = map(int, b.xyxy[0].tolist())
                         boxes_xyxy.append([x1, y1, x2, y2])
                         confs.append(score)
 
@@ -194,10 +228,13 @@ def main():
     except KeyboardInterrupt:
         print("Interrumpido por el usuario.")
     finally:
-        cap.release()
+        try:
+            cap.release()
+        except Exception:
+            pass
         cv2.destroyAllWindows()
 
-    # Gráfica final en .jpg
+    # Generate final .jpg plot
     try:
         plot_csv(CSV_PATH, PLOT_PATH)
     except Exception as e:

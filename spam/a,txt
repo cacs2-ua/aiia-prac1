@@ -1,15 +1,5 @@
-sudo bash -c 'cat >/etc/systemd/system/frame-receiver.service' <<'EOF'
-[Unit]
-Description=FastAPI Frame Receiver
-After=network.target
-
-[Service]
-User=azure-user
-WorkingDirectory=/home/azure-user/apps/receiver
-Environment="PATH=/home/azure-user/apps/receiver/.venv/bin"
-ExecStart=/home/azure-user/apps/receiver/.venv/bin/uvicorn vm_receiver:app --host 0.0.0.0 --port 8000
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
+A forward-propagation approach: model inputs X with their uncertainty (often via probability distributions), 
+sample many input realizations, compute A=f(x) for each, and summarize 
+the resulting distribution of A (mean, standard deviation, credible/confidence intervals). 
+It naturally handles nonlinear functions and correlated inputs (if modeled), at the cost of computational effort; 
+accuracy improves as the number of simulations increases.
