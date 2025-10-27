@@ -4,21 +4,29 @@ import os
 import tempfile
 import csv
 from datetime import datetime
-from ultralytics import YOLO
-import cv2
+from azure.ai.vision.imageanalysis import ImageAnalysisClient
+from azure.ai.vision.imageanalysis.models import VisualFeatures
+from azure.core.credentials import AzureKeyCredential
 
 app = func.FunctionApp()
 
-# Cargar el modelo YOLO una sola vez (mejor rendimiento)
-MODEL_PATH = "yolov8n.pt"
-model = YOLO(MODEL_PATH)
-CSV_PATH = "person_counts.csv"
-PERSON_CLASS_ID = 0  # COCO class for person
+# --- CONFIGURACIÓN ---
+VISION_ENDPOINT = "https://aiia-ia.services.ai.azure.com/"
+VISION_KEY = "4f4OExuyPq3BK2Zz0dc7QPiMSkpTHWFoQCsqkGPlq0ZTdOSbXXr1JQQJ99BJAC5T7U2XJ3w3AAAAACOGI6zB"
 CONF_THRESHOLD = 0.5
+CSV_PATH = "person_counts.csv"
+
+# --- LIMPIAR LOGS VERBOSOS DEL SDK DE AZURE ---
+# Solo queremos ver nuestros mensajes, no los del cliente HTTP interno
+for noisy_logger in [
+    "azure.core.pipeline.policies.http_logging_policy",
+    "azure.core.pipeline.policies._universal",
+    "azure.core.pipeline.policies._retry",
+]:
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
 def ensure_csv_with_header(csv_path: str):
-    """Crea CSV con encabezado si no existe."""
     if not os.path.exists(csv_path):
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["Timestamp", "Person_Count"])
@@ -26,7 +34,6 @@ def ensure_csv_with_header(csv_path: str):
 
 
 def append_csv(csv_path: str, ts: str, count: int):
-    """Agrega una fila (timestamp, count) al CSV."""
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["Timestamp", "Person_Count"])
         writer.writerow({"Timestamp": ts, "Person_Count": count})
@@ -39,9 +46,10 @@ def append_csv(csv_path: str, ts: str, count: int):
 )
 def ProcessUploadedImage(myblob: func.InputStream):
     """Se activa cuando se sube un nuevo blob (imagen)."""
-    logging.info(f"📦 Nuevo blob detectado: {myblob.name} ({myblob.length} bytes)")
 
-    # Crear CSV si no existe
+    # Mensaje inicial limpio
+    logging.info(f"Imagen subida detectada: {myblob.name}")
+
     ensure_csv_with_header(CSV_PATH)
 
     # Guardar el blob temporalmente
@@ -50,31 +58,36 @@ def ProcessUploadedImage(myblob: func.InputStream):
         temp_path = temp.name
 
     try:
-        # Leer imagen
-        frame = cv2.imread(temp_path)
-        if frame is None:
-            logging.error(f"❌ No se pudo leer la imagen: {temp_path}")
-            return
-
-        # Ejecutar YOLO solo para clase 'person'
-        results = model.predict(
-            source=frame,
-            conf=CONF_THRESHOLD,
-            classes=[PERSON_CLASS_ID],
-            verbose=False
+        # Crear cliente de Azure Computer Vision
+        client = ImageAnalysisClient(
+            endpoint=VISION_ENDPOINT,
+            credential=AzureKeyCredential(VISION_KEY)
         )
 
-        res = results[0]
-        person_count = len(res.boxes) if hasattr(res, "boxes") else 0
+        with open(temp_path, "rb") as f:
+            image_data = f.read()
 
-        # Guardar resultado en CSV
+        # Analizar personas
+        result = client.analyze(
+            image_data=image_data,
+            visual_features=[VisualFeatures.PEOPLE],
+            language="en"
+        )
+
+        person_count = 0
+        if result.people is not None:
+            for person in result.people.list:
+                if person.confidence and person.confidence >= CONF_THRESHOLD:
+                    person_count += 1
+
+        # Guardar CSV y mostrar resumen
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         append_csv(CSV_PATH, timestamp, person_count)
 
-        logging.info(f"✅ {timestamp} → Personas detectadas: {person_count}")
+        logging.info(f"Procesada '{myblob.name}' → {person_count} personas detectadas")
 
     except Exception as e:
-        logging.error(f"⚠️ Error procesando imagen: {e}")
+        logging.error(f" Error procesando imagen '{myblob.name}': {e}")
     finally:
         try:
             os.remove(temp_path)
