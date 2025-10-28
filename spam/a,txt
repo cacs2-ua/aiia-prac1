@@ -1,5 +1,0 @@
-A forward-propagation approach: model inputs X with their uncertainty (often via probability distributions), 
-sample many input realizations, compute A=f(x) for each, and summarize 
-the resulting distribution of A (mean, standard deviation, credible/confidence intervals). 
-It naturally handles nonlinear functions and correlated inputs (if modeled), at the cost of computational effort; 
-accuracy improves as the number of simulations increases.
