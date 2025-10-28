@@ -20,13 +20,13 @@ def main():
     container_client = blob_service_client.get_container_client("process")
 
     cap = open_capture("https://video2archives.earthcam.com/earthcamtv-vod/_definst_/mp4:archives/AbbeyRoadHD1/backup.mp4/playlist.m3u8")
-    print("📸 Starting frame capture... Press Ctrl+C to stop.")
+    print("Starting frame capture...")
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("⚠️ Could not read frame, retrying...")
+                print("Could not read frame, retrying...")
                 time.sleep(1)
                 continue
 
@@ -34,17 +34,16 @@ def main():
             filename = f"frame_{ts}.jpg"
             cv2.imwrite(filename, frame)
 
-            # Upload to Azure
             blob_client = container_client.get_blob_client(filename)
             with open(filename, "rb") as data:
                 blob_client.upload_blob(data, overwrite=True)
-            print(f"⬆️ Uploaded: {filename}")
+            print(f"Uploaded: {filename}")
 
             os.remove(filename)
             time.sleep(0.5)
 
     except KeyboardInterrupt:
-        print("\n🛑 Stopped by user.")
+        print("\nStopped.")
     finally:
         cap.release()
 

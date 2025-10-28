@@ -1,3 +1,4 @@
 azure-functions
-ultralytics
-opencv-python-headless
+azure-ai-vision-imageanalysis
+azure-storage-blob
+pillow
