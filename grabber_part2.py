@@ -237,7 +237,7 @@ def main():
             try:
                 resp = send_to_vm(args.vm_url, jpg, args.camera_id, args.token, timeout_s=args.http_timeout)
             except requests.Timeout:
-                print(f"[LOCAL] ({sent+1}) VM TIMEOUT after {args.http-timeout}s")
+                print(f"[LOCAL] ({sent+1}) VM TIMEOUT after {args.http.timeout}s")
                 # continue loop; do not count as sent
                 continue
             except requests.RequestException as rexc:
