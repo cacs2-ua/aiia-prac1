@@ -11,6 +11,13 @@
 #
 #   # Run continuously from webcam 1
 #   python grabber.py --stream-url 1 --vm-url http://<VM_IP>:7001/upload --samples -1 --interval 3
+#
+# Task 2.4 instrumentation:
+# - Latency end-to-end (e2e_ms) around the HTTP POST
+# - Server processing fallback keys: processing_ms | proc_ms | total_ms
+# - Save each JPEG locally with sequential frame_id (outframes/<id>.jpg)
+# - Append perf CSV with extended header:
+#   ["ts","frame_id","e2e_ms","processing_ms","bytes_sent","status","server_count","server_ts"]
 
 import argparse
 import csv
@@ -26,6 +33,10 @@ import cv2
 import numpy as np
 import requests
 
+PERF_FIELDS = [
+    "ts", "frame_id", "e2e_ms", "processing_ms",
+    "bytes_sent", "status", "server_count", "server_ts"
+]
 
 def ensure_parent_dir(path: str) -> None:
     """Create parent directory for a file path if it does not exist (no-op if path has no dir)."""
@@ -33,18 +44,36 @@ def ensure_parent_dir(path: str) -> None:
     if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
 
+def ensure_dir(path: str) -> None:
+    if path and not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
 
-def init_perf_csv(csv_path: str) -> None:
-    """Create perf CSV with header if it does not exist."""
+def init_or_rotate_perf_csv(csv_path: str) -> None:
+    """
+    Ensure CSV exists with the expected header. If the file exists with a different header,
+    rotate it to <path>.bak-YYYYmmddHHMMSS and create a fresh one.
+    """
     ensure_parent_dir(csv_path)
+    if os.path.exists(csv_path):
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                first = f.readline().strip()
+            expected = ",".join(PERF_FIELDS)
+            if first and first.replace(" ", "") != expected.replace(" ", ""):
+                stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                bak = f"{csv_path}.bak-{stamp}"
+                os.replace(csv_path, bak)
+                print(f"[LOCAL] Existing CSV header differs. Rotated to: {bak}")
+        except Exception:
+            # If any issue reading, rotate to be safe
+            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            bak = f"{csv_path}.bak-{stamp}"
+            os.replace(csv_path, bak)
+            print(f"[LOCAL] CSV not readable. Rotated to: {bak}")
     if not os.path.exists(csv_path):
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(
-                f,
-                fieldnames=["ts", "e2e_ms", "processing_ms", "bytes_sent", "status"],
-            )
+            w = csv.DictWriter(f, fieldnames=PERF_FIELDS)
             w.writeheader()
-
 
 def parse_capture_source(s: str) -> Any:
     """
@@ -52,13 +81,11 @@ def parse_capture_source(s: str) -> Any:
     - "0", "1", etc. -> int device index
     - anything else -> str (URL/file)
     """
-    s = s.strip()
+    s = str(s).strip()
     try:
-        # int("0") works; int("http://...") raises ValueError -> URL branch
         return int(s)
     except ValueError:
         return s
-
 
 def open_capture(src: Any) -> cv2.VideoCapture:
     """
@@ -68,7 +95,6 @@ def open_capture(src: Any) -> cv2.VideoCapture:
     """
     if isinstance(src, int):
         if platform.system() == "Windows":
-            # Try backends that often reduce webcam open latency on Windows
             for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY):
                 cap = cv2.VideoCapture(src, backend)
                 if cap.isOpened():
@@ -81,7 +107,6 @@ def open_capture(src: Any) -> cv2.VideoCapture:
         if not cap.isOpened():
             cap = cv2.VideoCapture(src)
         return cap
-
 
 def grab_frame_iter(src: Any, interval_s: float):
     """
@@ -116,7 +141,6 @@ def grab_frame_iter(src: Any, interval_s: float):
                 last = now
                 yield frame
             else:
-                # Small sleep to avoid busy-looping when interval is large
                 time.sleep(min(0.05, max(0.0, interval_s - (now - last))))
 
         except KeyboardInterrupt:
@@ -134,7 +158,6 @@ def grab_frame_iter(src: Any, interval_s: float):
     if cap is not None:
         cap.release()
 
-
 def encode_jpeg(frame: np.ndarray, quality: int = 90, max_width: Optional[int] = None) -> bytes:
     """Encode a frame to JPEG. Optionally resize if width exceeds 'max_width'."""
     img = frame
@@ -149,12 +172,12 @@ def encode_jpeg(frame: np.ndarray, quality: int = 90, max_width: Optional[int] =
         raise RuntimeError("Failed to encode JPEG.")
     return buf.tobytes()
 
-
 def send_to_vm(
     vm_url: str,
     jpg_bytes: bytes,
     camera_id: str,
     token: Optional[str],
+    frame_id: int,
     timeout_s: float = 10.0,
 ):
     """
@@ -170,78 +193,38 @@ def send_to_vm(
     meta = {
         "timestamp_local": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "camera_id": camera_id,
+        "frame_id": int(frame_id),
     }
 
     files = {"frame": ("frame.jpg", jpg_bytes, "image/jpeg")}
     data = {"meta": json.dumps(meta, ensure_ascii=False)}
 
-    # Use (connect_timeout, read_timeout) for better control
-    resp = requests.post(vm_url, headers=headers, files=files, data=data, timeout=(5, timeout_s))
+    resp = requests.post(
+        vm_url,
+        headers=headers,
+        files=files,
+        data=data,
+        timeout=(5, timeout_s)  # (connect_timeout, read_timeout)
+    )
     return resp
-
 
 def parse_args():
     p = argparse.ArgumentParser(
         description="Capture frames from webcam/stream and send them to a VM for YOLOv8 counting (Task 2.2 → Task 2.3)."
     )
-    p.add_argument(
-        "--stream-url",
-        required=True,
-        help="Webcam index (e.g., 0 or 1) OR stream URL (HLS .m3u8 / MJPEG).",
-    )
-    p.add_argument(
-        "--vm-url",
-        required=True,
-        help="HTTP endpoint on the VM, e.g., http://IP:7001/upload",
-    )
-    p.add_argument(
-        "--interval",
-        type=float,
-        default=5.0,
-        help="Seconds between samples (default 5.0). First frame is immediate.",
-    )
-    p.add_argument(
-        "--samples",
-        type=int,
-        default=1,
-        help="How many frames to send (default 1). Use -1 for infinite.",
-    )
-    p.add_argument(
-        "--camera-id",
-        default="cam01",
-        help="Logical camera identifier to include in metadata.",
-    )
-    p.add_argument(
-        "--jpeg-quality",
-        type=int,
-        default=90,
-        help="JPEG quality (1-100).",
-    )
-    p.add_argument(
-        "--max-width",
-        type=int,
-        default=1280,
-        help="Resize if frame width exceeds this value (use 0 to disable).",
-    )
-    p.add_argument(
-        "--token",
-        default=None,
-        help="Optional API key (sent as header X-API-Key).",
-    )
-    p.add_argument(
-        "--http-timeout",
-        type=float,
-        default=10.0,
-        help="Read timeout (seconds) for the POST request (connect timeout fixed at 5s).",
-    )
-    p.add_argument(
-        "--perf-csv",
-        type=str,
-        default="perf_client.csv",
-        help="Path to CSV where latency entries are appended.",
-    )
+    p.add_argument("--stream-url", required=True, help="Webcam index (e.g., 0 or 1) OR stream URL (HLS .m3u8 / MJPEG).")
+    p.add_argument("--vm-url", required=True, help="HTTP endpoint on the VM, e.g., http://IP:7001/upload")
+    p.add_argument("--interval", type=float, default=5.0, help="Seconds between samples (default 5.0). First frame is immediate.")
+    p.add_argument("--samples", type=int, default=1, help="How many frames to send (default 1). Use -1 for infinite.")
+    p.add_argument("--camera-id", default="cam01", help="Logical camera identifier to include in metadata.")
+    p.add_argument("--jpeg-quality", type=int, default=90, help="JPEG quality (1-100).")
+    p.add_argument("--max-width", type=int, default=1280, help="Resize if frame width exceeds this value (use 0 to disable).")
+    p.add_argument("--token", default=None, help="Optional API key (sent as header X-API-Key).")
+    p.add_argument("--http-timeout", type=float, default=10.0, help="Read timeout (seconds) for the POST request (connect timeout fixed at 5s).")
+    p.add_argument("--perf-csv", type=str, default="perf_client.csv", help="Path to CSV where latency entries are appended.")
+    p.add_argument("--save-frames-dir", type=str, default="outframes", help="Directory to save the JPEGs sent to the VM.")
+    p.add_argument("--no-save-frames", action="store_true", help="Do not save the JPEGs locally.")
     return p.parse_args()
-
 
 def main():
     args = parse_args()
@@ -253,35 +236,43 @@ def main():
         print("[LOCAL] --samples 0 means no work; exiting.")
         return
 
-    # Prepare latency CSV
-    init_perf_csv(args.perf_csv)
+    # Prepare directories and CSV
+    if not args.no_save_frames:
+        ensure_dir(args.save_frames_dir)
+    init_or_rotate_perf_csv(args.perf_csv)
     perf_file = open(args.perf_csv, "a", newline="", encoding="utf-8")
-    perf_writer = csv.DictWriter(
-        perf_file, fieldnames=["ts", "e2e_ms", "processing_ms", "bytes_sent", "status"]
-    )
+    perf_writer = csv.DictWriter(perf_file, fieldnames=PERF_FIELDS)
 
+    # Sequential frame id
+    frame_seq = 0
     sent = 0
     try:
         for frame in grab_frame_iter(src, max(0.0, args.interval)):
+            frame_seq += 1
+            # Encode JPEG
             jpg = encode_jpeg(
                 frame,
                 quality=args.jpeg_quality,
                 max_width=(args.max_width if args.max_width > 0 else None),
             )
 
-            # Measure end-to-end latency around the HTTP POST
+            # Save JPEG locally with frame_id
+            if not args.no_save_frames:
+                out_path = os.path.join(args.save_frames_dir, f"{frame_seq}.jpg")
+                ensure_parent_dir(out_path)
+                with open(out_path, "wb") as _f:
+                    _f.write(jpg)
+
+            # POST + e2e latency
             t0 = time.perf_counter()
             try:
-                resp = send_to_vm(args.vm_url, jpg, args.camera_id, args.token, timeout_s=args.http_timeout)
+                resp = send_to_vm(args.vm_url, jpg, args.camera_id, args.token, frame_seq, timeout_s=args.http_timeout)
             except requests.Timeout:
-                # Log a timeout event without e2e_ms (unknown), use status 408-like marker
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 perf_writer.writerow({
-                    "ts": ts,
-                    "e2e_ms": "",
-                    "processing_ms": "",
-                    "bytes_sent": len(jpg),
-                    "status": "TIMEOUT",
+                    "ts": ts, "frame_id": frame_seq, "e2e_ms": "",
+                    "processing_ms": "", "bytes_sent": len(jpg),
+                    "status": "TIMEOUT", "server_count": "", "server_ts": ""
                 })
                 perf_file.flush()
                 print(f"[LOCAL] ({sent+1}) VM TIMEOUT after {args.http_timeout}s")
@@ -289,11 +280,9 @@ def main():
             except requests.RequestException as rexc:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 perf_writer.writerow({
-                    "ts": ts,
-                    "e2e_ms": "",
-                    "processing_ms": "",
-                    "bytes_sent": len(jpg),
-                    "status": f"REQ_ERR:{type(rexc).__name__}",
+                    "ts": ts, "frame_id": frame_seq, "e2e_ms": "",
+                    "processing_ms": "", "bytes_sent": len(jpg),
+                    "status": f"REQ_ERR:{type(rexc).__name__}", "server_count": "", "server_ts": ""
                 })
                 perf_file.flush()
                 print(f"[LOCAL] ({sent+1}) VM REQUEST ERROR: {rexc}")
@@ -304,36 +293,50 @@ def main():
             bytes_sent = len(jpg)
             status_code = resp.status_code
 
+            # Parse server JSON (proc_ms aliasing)
             processing_ms = None
+            server_count = None
+            server_ts = ""
+            payload_preview = None
             try:
                 payload_json = resp.json()
-                # server may return {"processing_ms": ..., "total_ms": ..., "count": ...}
-                processing_ms = payload_json.get("processing_ms", None)
+                processing_ms = (
+                    payload_json.get("processing_ms")
+                    or payload_json.get("proc_ms")
+                    or payload_json.get("total_ms")
+                )
+                server_count = payload_json.get("person_count")
+                server_ts = payload_json.get("timestamp_utc", "")
+                payload_preview = payload_json
             except Exception:
-                payload_json = None  # not JSON; ignore
+                payload_preview = resp.text[:300]
 
-            # Append latency row
+            # Append row
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             perf_writer.writerow({
                 "ts": ts,
+                "frame_id": frame_seq,
                 "e2e_ms": round(e2e_ms, 2),
                 "processing_ms": (round(float(processing_ms), 2) if processing_ms is not None else ""),
                 "bytes_sent": bytes_sent,
                 "status": status_code,
+                "server_count": (int(server_count) if isinstance(server_count, (int, float, str)) and str(server_count).isdigit() else (server_count if server_count is not None else "")),
+                "server_ts": server_ts
             })
             perf_file.flush()
 
             sent += 1
-            if resp.ok:
-                if payload_json is None:
-                    preview = resp.text[:300]
-                else:
-                    preview = payload_json
-                print(f"[LOCAL] ({sent}) VM OK {status_code} | e2e_ms={e2e_ms:.2f} ms, "
-                      f"processing_ms={processing_ms} | payload={preview}")
+            if 200 <= status_code < 300:
+                print(
+                    f"[LOCAL] ({sent}) VM OK {status_code} | frame_id={frame_seq} "
+                    f"| e2e_ms={e2e_ms:.2f} ms, processing_ms={processing_ms} "
+                    f"| server_count={server_count} | payload={payload_preview}"
+                )
             else:
-                print(f"[LOCAL] ({sent}) VM ERROR {status_code}: {resp.text[:300]} | "
-                      f"e2e_ms={e2e_ms:.2f} ms, processing_ms={processing_ms}")
+                print(
+                    f"[LOCAL] ({sent}) VM ERROR {status_code}: {payload_preview} "
+                    f"| frame_id={frame_seq} | e2e_ms={e2e_ms:.2f} ms, processing_ms={processing_ms}"
+                )
 
             if args.samples != -1 and sent >= args.samples:
                 break
@@ -348,7 +351,6 @@ def main():
             perf_file.close()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     main()
