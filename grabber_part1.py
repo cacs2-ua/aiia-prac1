@@ -138,7 +138,7 @@ def parse_args():
     parser.add_argument(
         "--stream-url",
         type=str,
-        default="https://video2archives.earthcam.com/earthcamtv-vod/_definst_/mp4:archives/AbbeyRoadHD1/backup.mp4/playlist.m3u8",
+        default="https://video2archives.earthcam.com//earthcamtv-vod//_definst_//mp4:archives//4282//backup.mp4//playlist.m3u8",
         help="Stream URL/path (HLS .m3u8, MJPEG, local file). Use '0' (or '1', ...) for a webcam index."
     )
     parser.add_argument("--interval", type=float, default=5.0,
