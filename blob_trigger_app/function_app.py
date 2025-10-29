@@ -7,8 +7,8 @@ from datetime import datetime
 from azure.ai.vision.imageanalysis import ImageAnalysisClient
 from azure.ai.vision.imageanalysis.models import VisualFeatures
 from azure.core.credentials import AzureKeyCredential
-from azure.storage.blob import BlobServiceClient  # 🚀 for uploading
-from PIL import Image, ImageDraw  # 🚀 for drawing boxes
+from azure.storage.blob import BlobServiceClient
+from PIL import Image, ImageDraw
 
 app = func.FunctionApp()
 
@@ -17,7 +17,6 @@ VISION_KEY = "4f4OExuyPq3BK2Zz0dc7QPiMSkpTHWFoQCsqkGPlq0ZTdOSbXXr1JQQJ99BJAC5T7U
 CONF_THRESHOLD = 0.7
 CSV_PATH = "person_counts.csv"
 
-# 🚀 placeholders for storage upload
 BLOB_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=aiiatask3;AccountKey=jbGC+C+gg/9Zb+vBo34Jyu72GIM6dW6lOdQzXFcalwQlYxSG5km4KaJXwaWoNIUCU6apHbgJJIGm+ASt8IHmxA==;EndpointSuffix=core.windows.net"
 OUTPUT_CONTAINER = "$web"
 
@@ -42,14 +41,12 @@ def append_csv(csv_path: str, ts: str, count: int):
         writer.writerow({"Timestamp": ts, "Person_Count": count})
 
 
-# 🚀 Draw bounding boxes for each detected person
 def draw_bounding_boxes(image_path: str, people, output_path: str):
     image = Image.open(image_path).convert("RGB")
     draw = ImageDraw.Draw(image)
 
     for person in people.list:
         if person.confidence and person.confidence >= CONF_THRESHOLD:
-            # Azure Vision gives bounding boxes as (x, y, width, height)
             box = person.bounding_box
             left = box.x
             top = box.y
@@ -63,16 +60,14 @@ def draw_bounding_boxes(image_path: str, people, output_path: str):
     return output_path
 
 
-# 🚀 Upload the processed image to Azure Blob Storage
 def upload_to_blob(container_name: str, file_path: str, blob_name: str):
     blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
     container_client = blob_service_client.get_container_client(container_name)
 
-    # Create the container if it doesn’t exist
     try:
         container_client.create_container()
     except Exception:
-        pass  # container may already exist
+        pass
 
     blob_client = container_client.get_blob_client(blob_name)
     with open(file_path, "rb") as data:
@@ -116,7 +111,6 @@ def ProcessUploadedImage(myblob: func.InputStream):
                 if person.confidence and person.confidence >= CONF_THRESHOLD:
                     person_count += 1
 
-        # 🚀 Draw bounding boxes and save locally
         if result.people and len(result.people.list) > 0:
             bounds_path = os.path.join(tempfile.gettempdir(), "bounds.jpg")
             draw_bounding_boxes(temp_path, result.people, bounds_path)
