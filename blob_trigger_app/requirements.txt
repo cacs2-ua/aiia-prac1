@@ -1,0 +1,4 @@
+azure-functions
+azure-ai-vision-imageanalysis
+azure-storage-blob
+pillow

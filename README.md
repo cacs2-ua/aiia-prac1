@@ -1,1 +1,1 @@
-# aiia-prac1
+# aiia-prac1 hecho hasta la 2.3 y la 2.4 faltan algunas métricas
